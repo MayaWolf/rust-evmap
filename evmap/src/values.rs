@@ -228,15 +228,13 @@ where
         }
     }
 
-    pub(crate) fn swap_remove(&mut self, value: &T) {
+    pub(crate) fn swap_remove(&mut self, value: &T) -> Option<Aliased<T>> {
         match self.0 {
             ValuesInner::Short(ref mut v) => {
-                if let Some(i) = v.iter().position(|v| &**v == value) {
-                    v.swap_remove(i);
-                }
+                v.iter().position(|v| &**v == value).map(|i| v.swap_remove(i))
             }
             ValuesInner::Long(ref mut v) => {
-                v.remove(value);
+                v.take_all(value).map(|(v, _)| v)
             }
         }
     }
@@ -294,10 +292,10 @@ where
 
     pub(crate) fn retain<F>(&mut self, mut f: F)
     where
-        F: FnMut(&T) -> bool,
+        F: FnMut(&Aliased<T>) -> bool,
     {
         match self.0 {
-            ValuesInner::Short(ref mut v) => v.retain(|v| f(&*v)),
+            ValuesInner::Short(ref mut v) => v.retain(|v| f(v)),
             ValuesInner::Long(ref mut v) => v.retain(|v, n| if f(v) { n } else { 0 }),
         }
     }
@@ -314,6 +312,21 @@ where
                 let mut long = hashbag::HashBag::with_hasher(hasher.clone());
                 long.extend(l.set_iter().map(|(v, n)| (v.alias(), n)));
                 Self(ValuesInner::Long(long))
+            }
+        }
+    }
+
+    pub(crate) fn drop_all(&mut self) {
+        match self.0 {
+            ValuesInner::Short(ref mut v) => {
+                for item in v.drain(..) {
+                    item.drop()
+                }
+            },
+            ValuesInner::Long(ref mut v) => {
+                for (item, _) in v.drain() {
+                    item.drop()
+                }
             }
         }
     }

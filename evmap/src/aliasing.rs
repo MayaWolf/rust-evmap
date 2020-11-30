@@ -1,4 +1,3 @@
-use std::cell::Cell;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ops::Deref;
@@ -51,6 +50,10 @@ impl<T> Aliased<T> {
             _no_auto_send: PhantomData,
         }
     }
+
+    pub(crate) fn drop(&self) {
+        unsafe { std::ptr::drop_in_place(self.aliased.as_ptr() as *mut Aliased<T>) }
+    }
 }
 
 // Aliased gives &T across threads if shared or sent across thread boundaries.
@@ -60,48 +63,6 @@ impl<T> Aliased<T> {
 // Note that these bounds are stricter than what the compiler would auto-generate for the type.
 unsafe impl<T> Send for Aliased<T> where T: Send + Sync {}
 unsafe impl<T> Sync for Aliased<T> where T: Sync {}
-
-// XXX: Is this a problem if people start nesting evmaps?
-// I feel like the answer is yes.
-thread_local! {
-    static DROP_FOR_REAL: Cell<bool> = Cell::new(false);
-}
-
-/// Make _any_ dropped `Aliased` actually drop their inner `T`.
-///
-/// Be very careful: this function will cause _all_ dropped `Aliased` to drop their `T`.
-///
-/// When the return value is dropped, dropping `Aliased` will have no effect again.
-///
-/// # Safety
-///
-/// Only set this when any following `Aliased` that are dropped are no longer aliased.
-pub(crate) unsafe fn drop_copies() -> impl Drop {
-    struct DropGuard;
-    impl Drop for DropGuard {
-        fn drop(&mut self) {
-            DROP_FOR_REAL.with(|dfr| dfr.set(false));
-        }
-    }
-    let guard = DropGuard;
-    DROP_FOR_REAL.with(|dfr| dfr.set(true));
-    guard
-}
-
-impl<T> Drop for Aliased<T> {
-    fn drop(&mut self) {
-        DROP_FOR_REAL.with(move |drop_for_real| {
-            if drop_for_real.get() {
-                // safety:
-                //   MaybeUninit<T> was created from a valid T.
-                //   That T has not been dropped (drop_copies is unsafe).
-                //   T is no longer aliased (drop_copies is unsafe),
-                //   so we are allowed to re-take ownership of the T.
-                unsafe { std::ptr::drop_in_place(self.aliased.as_mut_ptr()) }
-            }
-        })
-    }
-}
 
 impl<T> AsRef<T> for Aliased<T> {
     fn as_ref(&self) -> &T {

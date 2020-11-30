@@ -425,7 +425,6 @@ where
 
     /// Apply operations while allowing dropping of values
     fn absorb_second(&mut self, op: Operation<K, V, M>, other: &Self) {
-        let _guard = unsafe { crate::aliasing::drop_copies() };
         // NOTE: the dropping here applies equally to Vs in the Operation as to Vs in the map.
         // So, we need to make sure _consume_ the Aliased from the oplog.
 
@@ -435,14 +434,14 @@ where
                 let v = self.data.entry(key).or_insert_with(Values::new);
 
                 // we are going second, so we should drop!
-                v.clear();
+                v.drop_all();
 
                 v.shrink_to_fit();
 
                 v.push(value, hasher);
             }
             Operation::Clear(key) => {
-                self.data.entry(key).or_insert_with(Values::new).clear();
+                self.data.entry(key).or_insert_with(Values::new).drop_all();
             }
             Operation::Add(key, value) => {
                 self.data
@@ -452,23 +451,33 @@ where
             }
             Operation::RemoveEntry(key) => {
                 #[cfg(not(feature = "indexed"))]
-                self.data.remove(&key);
+                if let Some(mut item) = self.data.remove(&key) {
+                    item.drop_all();
+                }
                 #[cfg(feature = "indexed")]
-                self.data.swap_remove(&key);
+                if let Some(item) = self.data.swap_remove(&key) {
+                    item.drop_all();
+                }
             }
             Operation::Purge => {
-                self.data.clear();
+                for (_, mut item) in self.data.drain() {
+                    item.drop_all();
+                }
             }
             #[cfg(feature = "eviction")]
             Operation::EmptyAt(indices) => {
                 for &index in indices.iter().rev() {
-                    self.data.swap_remove_index(index);
+                    if let Some(item) = self.data.swap_remove_index(index) {
+                        item.drop_all();
+                    }
                 }
             }
             Operation::RemoveValue(key, value) => {
                 if let Some(e) = self.data.get_mut(&key) {
                     // find the first entry that matches all fields
-                    e.swap_remove(&value);
+                    if let Some(item) = e.swap_remove(&value) {
+                        item.drop();
+                    }
                 }
             }
             Operation::Retain(key, mut predicate) => {
@@ -477,6 +486,9 @@ where
                     e.retain(move |v| {
                         let retain = predicate.eval(&*v, first);
                         first = false;
+                        if !retain {
+                            v.drop();
+                        }
                         retain
                     });
                 }
@@ -531,12 +543,14 @@ where
         // dropped by default.
     }
 
-    fn drop_second(self: Box<Self>) {
+    fn drop_second(mut self: Box<Self>) {
         // when the second copy is dropped is where we want to _actually_ drop all the values in
         // the map. we do that by setting drop_copies to true. we do it with a guard though to make
         // sure that if drop panics we unset the thread-local!
 
-        let _guard = unsafe { crate::aliasing::drop_copies() };
+        for (_, item) in &mut self.data {
+            item.drop_all();
+        }
         drop(self);
     }
 }
